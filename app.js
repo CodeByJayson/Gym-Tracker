@@ -314,22 +314,40 @@ function buildGhostCache() {
 
   for (const workout of workouts) {
     for (const ex of workout.exercises || []) {
+      /* Nur das jüngste Workout pro Übung zählt */
       if (cache[ex.name]) continue;
-      const best = (ex.sets || []).reduce((acc, s) => {
+
+      const sets = (ex.sets || []).filter((s) => s.done !== false);
+
+      if (sets.length === 0) continue;
+
+      /* Schwerster Satz als Kurzreferenz */
+      const best = sets.reduce((acc, s) => {
         if (!acc) return s;
         if (Number(s.weight) > Number(acc.weight)) return s;
         if (Number(s.weight) === Number(acc.weight) && Number(s.reps) > Number(acc.reps)) return s;
         return acc;
       }, null);
-      if (best) {
-        cache[ex.name] = {
-          weight: Number(best.weight) || 0,
-          reps:   Number(best.reps)   || 0,
-          date:   workout.date,
-        };
-      }
+
+      cache[ex.name] = {
+        /* Alle Sätze des letzten Workouts */
+        sets: sets.map((s) => ({
+          weight: Number(s.weight) || 0,
+          reps:   Number(s.reps)   || 0,
+        })),
+        /* Kurzreferenz: schwerster Satz */
+        weight: Number(best?.weight) || 0,
+        reps:   Number(best?.reps)   || 0,
+        count:  sets.length,
+        date:   workout.date,
+        /* Kompakter Text, z. B. "50×4, 50×4, 50×3" */
+        summary: sets
+          .map((s) => `${Number(s.weight) || 0}×${Number(s.reps) || 0}`)
+          .join(', '),
+      };
     }
   }
+
   AppState.ghostCache = cache;
   return cache;
 }
@@ -894,13 +912,19 @@ function renderWorkoutExercises() {
 function renderExerciseCard(exercise, exIdx) {
   const ghost = getGhostData(exercise.name);
 
-  const ghostBadge = ghost
+    const ghostBadge = ghost
     ? `
-      <div class="mt-3 flex items-center gap-2 text-[11px] text-zinc-500 bg-zinc-900/40 rounded-lg px-3 py-1.5">
-        <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 text-cyan-500/70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+      <div class="mt-3 flex items-start gap-2 text-[11px] text-zinc-500 bg-zinc-900/40 rounded-lg px-3 py-2">
+        <svg xmlns="http://www.w3.org/2000/svg" class="w-3.5 h-3.5 text-cyan-500/70 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
           <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
         </svg>
-        <span>Letztes Mal: <span class="text-cyan-400/80 font-medium">${ghost.weight} kg × ${ghost.reps}</span></span>
+        <div class="flex-1 min-w-0">
+          <p class="leading-tight">
+            Letztes Mal:
+            <span class="text-cyan-400/80 font-medium">${ghost.count} ${ghost.count === 1 ? 'Satz' : 'Sätze'}</span>
+          </p>
+          <p class="text-cyan-400/70 font-mono text-[10px] mt-0.5 truncate">${escapeHtml(ghost.summary)}</p>
+        </div>
       </div>
     `
     : '';
@@ -958,8 +982,14 @@ function renderSetRow(set, exIdx, setIdx, ghost) {
     : 'bg-zinc-800 border-zinc-700 text-transparent';
 
   const showGhostPlaceholder = ghost && setIdx === 0 && !set.done && Number(set.weight) === 0;
-  const weightPlaceholder = showGhostPlaceholder ? `z.B. ${ghost.weight}` : 'kg';
-  const repsPlaceholder   = showGhostPlaceholder ? `z.B. ${ghost.reps}`   : 'Wdh';
+
+  /* Ersten Satz aus der Historie als Placeholder nehmen */
+  const firstGhostSet = ghost?.sets && ghost.sets.length > 0 ? ghost.sets[0] : null;
+  const ghostWeight = firstGhostSet ? firstGhostSet.weight : (ghost?.weight || 0);
+  const ghostReps   = firstGhostSet ? firstGhostSet.reps   : (ghost?.reps   || 0);
+
+  const weightPlaceholder = showGhostPlaceholder ? `z.B. ${ghostWeight}` : 'kg';
+  const repsPlaceholder   = showGhostPlaceholder ? `z.B. ${ghostReps}`   : 'Wdh';
 
   return `
     <div
@@ -1532,7 +1562,7 @@ function renderExerciseLibrary() {
 function renderExerciseLibraryItem(ex) {
   const ghost = getGhostData(ex.name);
   const ghostInfo = ghost
-    ? `<p class="text-[10px] text-cyan-500/70 mt-0.5">zuletzt: ${ghost.weight} kg × ${ghost.reps}</p>`
+    ? `<p class="text-[10px] text-cyan-500/70 mt-0.5">zuletzt: ${ghost.count} ${ghost.count === 1 ? 'Satz' : 'Sätze'} · ${escapeHtml(ghost.summary)}</p>`
     : '';
 
   const customBadge = ex.custom
