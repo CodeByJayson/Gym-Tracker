@@ -21,10 +21,11 @@
    STORAGE-LAYER
    ========================================================================= */
 const STORAGE_KEYS = {
-  WORKOUTS:  'gymtracker.workouts',
-  WEIGHTS:   'gymtracker.weights',
-  EXERCISES: 'gymtracker.exercises',
-  SEEDED:    'gymtracker.seeded',
+  WORKOUTS:       'gymtracker.workouts',
+  WEIGHTS:        'gymtracker.weights',
+  EXERCISES:      'gymtracker.exercises',
+  SEEDED:         'gymtracker.seeded',
+  ACTIVE_WORKOUT: 'gymtracker.activeWorkout',
 };
 
 const _memoryStore = new Map();
@@ -478,17 +479,34 @@ function startWorkout(templateName = 'Push Day') {
 
   AppState.workoutSeconds = 0;
   startWorkoutTimer();
+  persistActiveWorkout(); 
   switchTab('workout');
   showToast?.(`${templateName} gestartet 💪`);
 }
 
 function startWorkoutTimer() {
   stopWorkoutTimer();
+  /* Sekunden aus startedAt berechnen – so läuft der Timer auch nach Reload korrekt */
+  recalculateWorkoutSeconds();
+  updateWorkoutTimerDisplay();
+
   AppState.workoutTimer = setInterval(() => {
-    AppState.workoutSeconds += 1;
+    recalculateWorkoutSeconds();
     updateWorkoutTimerDisplay();
   }, 1000);
-  updateWorkoutTimerDisplay();
+}
+
+function recalculateWorkoutSeconds() {
+  if (!AppState.activeWorkout?.startedAt) {
+    AppState.workoutSeconds = 0;
+    return;
+  }
+  const startMs = new Date(AppState.activeWorkout.startedAt).getTime();
+  if (isNaN(startMs)) {
+    AppState.workoutSeconds = 0;
+    return;
+  }
+  AppState.workoutSeconds = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
 }
 
 function stopWorkoutTimer() {
@@ -527,19 +545,25 @@ function finishWorkout() {
   const noteEl = document.getElementById('workout-note');
   const note = noteEl ? String(noteEl.value || '').trim().slice(0, 500) : '';
 
+  /* ---------- Fall 1: nichts abgehakt → verwerfen ---------- */
   if (cleanedExercises.length === 0) {
     if (!window.confirm('Du hast keinen Satz abgehakt. Workout wirklich verwerfen?')) return;
+
     AppState.activeWorkout = null;
     AppState.workoutNote = '';
     stopWorkoutTimer();
     AppState.workoutSeconds = 0;
     if (noteEl) noteEl.value = '';
+
+    clearActiveWorkoutFromStorage();   // ← Entwurf löschen
+
     renderWorkoutPage();
     showToast?.('Workout verworfen');
     switchTab('dashboard');
     return;
   }
 
+  /* ---------- Fall 2: Sätze vorhanden → speichern ---------- */
   const totalSets   = cleanedExercises.reduce((sum, ex) => sum + ex.sets.length, 0);
   const totalVolume = cleanedExercises.reduce(
     (sum, ex) => sum + ex.sets.reduce((s, set) => s + set.weight * set.reps, 0),
@@ -568,11 +592,15 @@ function finishWorkout() {
   const ok = saveWorkoutToStorage(entry);
   if (!ok) return;
 
+  /* Entwurf löschen, weil das Workout jetzt fest in "workouts" liegt */
+  clearActiveWorkoutFromStorage();
+
   AppState.activeWorkout = null;
   AppState.workoutNote = '';
   stopWorkoutTimer();
   AppState.workoutSeconds = 0;
   if (noteEl) noteEl.value = '';
+
   buildGhostCache();
   renderWorkoutPage();
   showToast?.(`Workout gespeichert · ${durationMin} Min · ${totalSets} Sätze`);
@@ -590,6 +618,10 @@ function cancelWorkout() {
   AppState.workoutNote = '';
   stopWorkoutTimer();
   AppState.workoutSeconds = 0;
+
+  /* Entwurf löschen, damit beim nächsten Start kein Workout mehr auftaucht */
+  clearActiveWorkoutFromStorage();
+
   renderWorkoutPage();
   showToast?.('Workout abgebrochen');
   switchTab('dashboard');
@@ -624,6 +656,68 @@ function saveWeightToStorage(entry) {
   storageSet(STORAGE_KEYS.WEIGHTS, JSON.stringify(all));
 
   return { ok: true, wasUpdate };
+}
+
+/* =========================================================================
+   LAUFENDES WORKOUT PERSISTIEREN
+   ========================================================================= */
+function saveActiveWorkoutToStorage() {
+  if (!AppState.activeWorkout) {
+    storageRemove(STORAGE_KEYS.ACTIVE_WORKOUT);
+    return;
+  }
+
+  /* Notiz aus dem DOM holen, damit nichts verloren geht */
+  const noteEl = document.getElementById('workout-note');
+  if (noteEl) {
+    AppState.workoutNote = String(noteEl.value || '').slice(0, 500);
+  }
+
+  const payload = {
+    version: 1,
+    savedAt: new Date().toISOString(),
+    workout: AppState.activeWorkout,
+    note:    AppState.workoutNote,
+  };
+
+  storageSet(STORAGE_KEYS.ACTIVE_WORKOUT, JSON.stringify(payload));
+}
+
+function loadActiveWorkoutFromStorage() {
+  try {
+    const raw = storageGet(STORAGE_KEYS.ACTIVE_WORKOUT);
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (!parsed.workout || typeof parsed.workout !== 'object') return null;
+
+    /* Minimal-Validierung: exercises muss ein Array sein */
+    if (!Array.isArray(parsed.workout.exercises)) return null;
+
+    return {
+      workout: parsed.workout,
+      note:    typeof parsed.note === 'string' ? parsed.note : '',
+    };
+  } catch (err) {
+    console.warn('[Storage] Aktives Workout konnte nicht gelesen werden:', err);
+    return null;
+  }
+}
+
+function clearActiveWorkoutFromStorage() {
+  storageRemove(STORAGE_KEYS.ACTIVE_WORKOUT);
+}
+
+/* Zentrale Aufräum-Funktion, die vom Rest der App aufgerufen wird */
+function persistActiveWorkout() {
+  /* Debounced: nicht bei jedem Tastendruck sofort schreiben */
+  if (persistActiveWorkout._timer) {
+    clearTimeout(persistActiveWorkout._timer);
+  }
+  persistActiveWorkout._timer = setTimeout(() => {
+    saveActiveWorkoutToStorage();
+  }, 200);
 }
 
 /* =========================================================================
@@ -963,6 +1057,8 @@ function attachWorkoutListeners() {
 
     const raw = input.value.trim().replace(',', '.');
     set[field] = raw === '' ? 0 : Number(raw);
+
+    persistActiveWorkout(); 
   });
 
   container.addEventListener('focusin', (event) => {
@@ -980,6 +1076,7 @@ function attachWorkoutNoteListener() {
 
   noteEl.addEventListener('input', (event) => {
     AppState.workoutNote = String(event.target.value || '').slice(0, 500);
+    persistActiveWorkout(); 
   });
 }
 
@@ -1012,6 +1109,8 @@ function toggleSetDone(exIdx, setIdx) {
   if (set.done && (Number(set.weight) > 0 || Number(set.reps) > 0)) {
     showToast?.(`Satz erledigt · ${set.weight} kg × ${set.reps}`);
   }
+
+  persistActiveWorkout();
 }
 
 function addSetToExercise(exIdx) {
@@ -1020,6 +1119,7 @@ function addSetToExercise(exIdx) {
 
   exercise.sets.push({ weight: 0, reps: 0, done: false });
   renderWorkoutExercises();
+  persistActiveWorkout();  
 
   requestAnimationFrame(() => {
     const newRow = document.querySelector(
@@ -1035,17 +1135,28 @@ function removeSetFromExercise(exIdx, setIdx) {
   const exercise = AppState.activeWorkout?.exercises[exIdx];
   if (!exercise) return;
 
-  if (exercise.sets.length <= 1) { showToast?.('Mindestens ein Satz erforderlich'); return; }
+  if (exercise.sets.length <= 1) {
+    showToast?.('Mindestens ein Satz erforderlich');
+    return;
+  }
+
   exercise.sets.splice(setIdx, 1);
   renderWorkoutExercises();
+  persistActiveWorkout(); 
 }
 
 function removeExercise(exIdx) {
   const workout = AppState.activeWorkout;
   if (!workout) return;
-  if (workout.exercises.length <= 1) { showToast?.('Mindestens eine Übung erforderlich'); return; }
+
+  if (workout.exercises.length <= 1) {
+    showToast?.('Mindestens eine Übung erforderlich');
+    return;
+  }
+
   workout.exercises.splice(exIdx, 1);
   renderWorkoutExercises();
+  persistActiveWorkout();   // NEU
 }
 
 /* =========================================================================
@@ -1117,6 +1228,7 @@ function saveWorkoutTitle() {
   const titleEl = document.getElementById('workout-title');
   if (titleEl) titleEl.textContent = newTitle;
 
+  persistActiveWorkout();   // NEU
   closeTitleEditor();
   showToast?.('Titel aktualisiert');
 }
@@ -1320,6 +1432,7 @@ function addExerciseFromPicker(name) {
   });
 
   renderWorkoutExercises();
+  persistActiveWorkout(); 
   showToast?.(`${libEx.name} hinzugefügt`);
   closeExercisePicker();
 }
@@ -2075,12 +2188,49 @@ document.addEventListener('DOMContentLoaded', () => {
   attachWorkoutNoteListener();
   setGreeting();
 
+  /* ===== Laufendes Workout wiederherstellen ===== */
+  const restored = loadActiveWorkoutFromStorage();
+  if (restored && restored.workout) {
+    AppState.activeWorkout = restored.workout;
+    AppState.workoutNote   = restored.note || '';
+
+    if (!AppState.activeWorkout.startedAt) {
+      AppState.activeWorkout.startedAt = new Date().toISOString();
+    }
+
+    startWorkoutTimer();
+    console.log('[GymTracker] Laufendes Workout wiederhergestellt:', AppState.activeWorkout.title);
+
+    setTimeout(() => {
+      showToast?.(`Workout "${AppState.activeWorkout.title}" fortgesetzt`);
+    }, 600);
+
+    AppState.currentTab = 'workout';
+  }
+  /* ============================================== */
+
   renderWorkoutPage();
   renderExercisesTab();
   renderDashboard();
 
+  /* Notizfeld nach dem Rendern befüllen */
+  const noteEl = document.getElementById('workout-note');
+  if (noteEl && AppState.workoutNote) {
+    noteEl.value = AppState.workoutNote;
+  }
+
   switchTab(AppState.currentTab);
   refreshHistory();
+
+  /* Beim Verlassen / Verstecken sofort speichern */
+  window.addEventListener('beforeunload', () => {
+    if (AppState.activeWorkout) saveActiveWorkoutToStorage();
+  });
+  window.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && AppState.activeWorkout) {
+      saveActiveWorkoutToStorage();
+    }
+  });
 
   if (!HAS_LOCALSTORAGE) {
     console.warn('[GymTracker] localStorage nicht verfügbar.');
